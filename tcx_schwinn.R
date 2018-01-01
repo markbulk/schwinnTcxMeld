@@ -1,19 +1,38 @@
+################################################################################################################################ 
 # This file is intended to convert a Garmin TCX and a Schwinn CSV file into a combined TCX that will actually be useful
 # Assumes the following:
-# - Schwinn module has been receiving heart rate information from HRM
-# - 
+# - Schwinn module has been receiving heart rate information from HRM which can be aligned to the TCX file
+# - A Garmin TCX file is available of the session
+# - The spin bike captured a heart rate signal within the first four minutes of the workout
+# 
+# Anticipated Process flow:
+# - Start Garmin Forerunner Spin Activity, ensure HRM is connected
+# - Pedal Schwinn and turn on head unit
+# - Insert USB stick to Schwinn Echelon unit
+# - SPIN, baby, SPIN!
+# - Hit end on Schwinn Echelon unit
+# - Stop Garmin activity
+# - Pull out USB stick
+# - Sync activity with Garmin Connect
+# - Download activity TCX file
+# - Run below test code
+# - Upload new TCX file
+# - Delete old GC activity
+################################################################################################################################
 library(data.table)
 library(lubridate)
 library(zoo)
 trim <- function (x) gsub("^\\s+|\\s+$", "", x)
-
+################################################################################################################################
 # test code
 # csvLocation <- '/Volumes/MacStorage/Dropbox/Fitness/MPOWER01.csv'
 # tcxLocation <- '/Users/markbulk/Downloads/activity_2401308812.tcx'
 # outputLocation <- '/Volumes/MacStorage/Dropbox/Fitness/test.tcx'
 # dt.full <- meldTcx(csvLocation, tcxLocation, timeZone = "America/New_York")
 # writeTcxNew(dt.input = dt.full, tcxLocation = tcxLocation, outputLocation = outputLocation)
+################################################################################################################################
 
+# Function to write the melded information to an output file, which can then be imported into Garmin Connect
 writeTcxNew <- function(dt.input = NULL, timeZone = "America/New_York", tcxLocation = NULL, outputLocation = NULL) {
     stopifnot(!is.null(dt.input))
     chr.block <- '          <Trackpoint>
@@ -60,6 +79,11 @@ writeTcxNew <- function(dt.input = NULL, timeZone = "America/New_York", tcxLocat
     close(outputCon)
 }
 
+# Function combines the Schwinn MPower CSV file and the Garmin TCX files to create a more data
+# rich rendering of a spin session.  Uses na.approx (linear interpolation) to fill in gaps of the data.
+# The Garmin TCX should be sampled almost every second, while the MPower csv will just be 10x per minute.
+# The TCX heart rate is used exclusively.  Any time after the MPower file is complete is assumed to have
+# no speed or further spin input.
 meldTcx <- function(csvLocation = NULL, tcxLocation = NULL, interpolate = TRUE, timeZone = "America/New_York") {
     stopifnot(!is.null(csvLocation) | !is.null(tcxLocation))
     dt.csv <- readSchwinnCsv(csvLocation)
@@ -87,12 +111,20 @@ meldTcx <- function(csvLocation = NULL, tcxLocation = NULL, interpolate = TRUE, 
     return(dt.join[, .(Time = timeJoin, HeartRateBpm = tcxHR, Distance.mile, Speed.mph, Watts, RPM)])
 }
 
-readSchwinnCsv <- function(csvLocation = NULL) {
+# Function reads in the file created by a Schwinn MPower Echelon head unit and preps for use in melding
+readSchwinnCsv <- function(csvLocation = NULL, bln.ignoreZeroHr = TRUE) {
+    stopifnot(!is.null(csvLocation))
+    vec.requiredColumns <- c('Stage_Workout..min.', 'Distance.mile.', 'Speed..mph.', 'HR', 'RPM')
     dt.csv <- data.table(read.csv2(file = csvLocation, header = TRUE, sep = ',', stringsAsFactors = FALSE))
-    while(nrow(dt.csv[HR == 0]) > 0) {
-        dt.csv[, lastHR := shift(HR, 1, type="lead")]
-        dt.csv[HR == 0, HR := lastHR]
-        dt.csv[, lastHR := NULL]
+    if(!all(vec.requiredColumns %in% names(dt.csv))) error("Missing expected Schwinn file column headings.")
+    if(bln.ignoreZeroHr) {
+        dt.csv <- dt.csv[HR != 0]
+    } else {
+        while(nrow(dt.csv[HR == 0]) > 0) {
+            dt.csv[, lastHR := shift(HR, 1, type="lead")]
+            dt.csv[HR == 0, HR := lastHR]
+            dt.csv[, lastHR := NULL]
+        }
     }
     dt.csv[, Stage_Workout..min. := as.numeric(Stage_Workout..min.)]
     dt.csv[, Distance.mile. := as.numeric(Distance.mile.)]
@@ -100,6 +132,9 @@ readSchwinnCsv <- function(csvLocation = NULL) {
     setnames(dt.csv, old = c('Stage_Workout..min.', 'Distance.mile.', 'Speed..mph.'), new = c('Stage_Workout.min', 'Distance.mile', 'Speed.mph'))
 }
 
+# Function reads the trackpoint section of a Garmin indoor biking activity file (using one created by 
+# my Forerunner 935, exported from Garmin Connect as an example).  The only columns extracted are heart
+# rate and time.
 readTCX <- function(tcxLocation = NULL, timeZone = "America/New_York") {
     stopifnot(!is.null(tcxLocation))
     con <- file(tcxLocation, "r")
@@ -118,9 +153,18 @@ readTCX <- function(tcxLocation = NULL, timeZone = "America/New_York") {
     dt.tcx[, `time` := gsub("T", " ", `time`)]
     dt.tcx[, zuluTime := as.POSIXct(`time`, tz = "Europe/London")]
     dt.tcx[, localTime := format(zuluTime, tz = timeZone, usetz = TRUE)]
+    if(nrow(dt.tcx[is.na(localTime)]) == nrow(dt.tcx)) {
+        error("Problem processing the TCX file - not getting valid timestamps for some reason.")
+    } else if(nrow(dt.tcx[is.na(localTime)]) > 0) {
+        warning(paste0(nrow(dt.tcx[is.na(localTime)]), " rows in the TCX file have invalid timestamps for some reason.  ", nrow(dt.tcx), ' total rows.'))
+    }
     return(dt.tcx[, .(time = localTime, tcxHR)])
 }
 
+# This function finds when the Schwinn file (dt.csv) should be joined to the Garmin TCX file (dt.tcx)
+# to minimize the amount of heart rate error between the two files.  Ideally there would be a time where the
+# error was zero, but that is probably just too easy.  If multiple time steps have the same minimum error
+# (super unlikely) it will arbitrarily choose the first one.
 minimizeHeartRateError <- function(dt.csv = NULL, dt.tcx = NULL, searchMin = 4) {
     lengthOfCsv <- dt.csv[nrow(dt.csv)]$Stage_Workout.min * 60
     lengthOfTcx <- as.numeric(as.duration(interval(dt.tcx[1]$time, dt.tcx[nrow(dt.tcx)]$time)))
