@@ -15,8 +15,8 @@
 # - Pull out USB stick
 # - Sync activity with Garmin Connect
 # - Download activity TCX file
-# - Run below test code
-# - Upload new TCX file
+# - Run below test code, substituting in your file locations
+# - Upload new TCX file to GC
 # - Delete old GC activity
 ################################################################################################################################
 library(data.table)
@@ -112,11 +112,13 @@ meldTcx <- function(csvLocation = NULL, tcxLocation = NULL, interpolate = TRUE, 
 }
 
 # Function reads in the file created by a Schwinn MPower Echelon head unit and preps for use in melding
+# Updated 2018-01-06 to deal with multiple stages in the information.  Simple fix with eliminating rows with NA's for RPM
 readSchwinnCsv <- function(csvLocation = NULL, bln.ignoreZeroHr = TRUE) {
     stopifnot(!is.null(csvLocation))
     vec.requiredColumns <- c('Stage_Workout..min.', 'Distance.mile.', 'Speed..mph.', 'HR', 'RPM')
-    dt.csv <- data.table(read.csv2(file = csvLocation, header = TRUE, sep = ',', stringsAsFactors = FALSE))
+    dt.csv <- data.table(read.csv2(file = csvLocation, header = TRUE, sep = ',', stringsAsFactors = FALSE))[!is.na(RPM)]
     if(!all(vec.requiredColumns %in% names(dt.csv))) error("Missing expected Schwinn file column headings.")
+    if(!all(as.character(sapply(dt.csv, class)) == c("character", "character", "character", "integer", "integer", "integer"))) error("Column types from Schwinn file are not as anticipated.")
     if(bln.ignoreZeroHr) {
         dt.csv <- dt.csv[HR != 0]
     } else {
