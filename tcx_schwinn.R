@@ -182,6 +182,6 @@ minimizeHeartRateError <- function(dt.csv = NULL, dt.tcx = NULL, searchMin = 4) 
             return(data.table(time = tm, error = sum(dt.merged$error ^ 2)))
         }
     }))
-    dt.return <- dt.error[error == min(dt.error$error)]
+    dt.return <- dt.error[error == min(dt.error$error, na.rm = TRUE)]
     return(dt.return[1]$time)   
 }
